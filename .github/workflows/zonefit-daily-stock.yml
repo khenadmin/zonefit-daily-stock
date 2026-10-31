@@ -94,3 +94,443 @@ jobs:
               const key=c.toLowerCase()+'|'+s,old=records.get(key);
               if(!old || ((old.minQty===null && parsed.minQty!==null) || (old.method!=='table' && method==='table'))){
                 records.set(key,{colour:c,size:s,quantity:parsed.label,minQty:parsed.minQty,status:parsed.status,isMinimum:parsed.isMinimum,method:method});
+              }
+              diagnostics.matchedCells++;
+            }
+            const tables=Array.from(root.querySelectorAll('table'));
+            diagnostics.tables=tables.length;
+            for(const table of tables){
+              const rows=Array.from(table.querySelectorAll('tr'));
+              const headIndex=rows.findIndex(tr=>{
+                const texts=Array.from(tr.children).map(x=>(x.textContent||'').trim().toUpperCase());
+                return texts.filter(x=>sizes.includes(canon(x))).length>=2;
+              });
+              if(headIndex<0)continue;
+              const header=Array.from(rows[headIndex].children).map(x=>canon((x.textContent||'').trim()));
+              const heads=header.map((name,i)=>({name,i})).filter(x=>sizes.includes(x.name));
+              for(const row of rows.slice(headIndex+1)){
+                const cells=Array.from(row.children).filter(x=>/^(TH|TD)$/.test(x.tagName));
+                if(cells.length<2)continue;
+                let colCell=cells[0];
+                const alt=colCell.querySelector('img[alt]')?.getAttribute('alt');
+                const colour=cleanColor(alt||colCell.getAttribute('data-colour')||colCell.textContent||'');
+                if(!colour)continue;
+                diagnostics.tableRows++;
+                for(const head of heads){
+                  const cell=cells[head.i];
+                  if(!cell)continue;
+                  const raw=cell.textContent||cell.getAttribute('data-stock')||'';
+                  put(colour,head.name,parseStock(raw,true),'table');
+                }
+              }
+              diagnostics.method.push('table');
+            }
+            const inputs=Array.from(root.querySelectorAll('[aria-label*="Quantity for"], [title*="Quantity for"], label, input'));
+            for(const input of inputs){
+              const label=String(input.getAttribute('aria-label')||input.getAttribute('title')||(/Quantity\s+for/i.test(input.textContent||'')?input.textContent:'')||'');
+              const m=label.match(/Quantity\s+for\s+(XSM|SML|MED|LRG|XLG|2XL|3XL|4XL|5XL|XS|S|M|L|XL|XXL)\s+([A-Z][A-Z0-9\s\-\/'’]{1,55})/i);
+              if(!m)continue;
+              diagnostics.quantityLabels++;
+              let found=null;
+              for(let a=input,p=0;a&&p<5;a=a.parentElement,p++){
+                const text=(a.textContent||'').replace(/\s+/g,' ').trim();
+                if(text.length>380)continue;
+                const val=parseStock(text,false);
+                if(val){found=val;break}
+                const stockAttribute=a.getAttribute('data-stock')||a.getAttribute('data-quantity')||'';
+                const fromAttribute=parseStock(stockAttribute,true);
+                if(fromAttribute){found=fromAttribute;break}
+              }
+              put(m[2],m[1],found,'label');
+            }
+            const raw=(root.body?.textContent||root.documentElement?.textContent||'').replace(/[\u00a0\t]+/g,' ').replace(/\s+/g,' ');
+            const regex=/Quantity\s+for\s+(XSM|SML|MED|LRG|XLG|2XL|3XL|4XL|5XL|XS|S|M|L|XL|XXL)\s+([A-Z][A-Z0-9\s\-\/'’]{1,50}?)(?=\s*(?:\[\s*Input|\d[\d,]*\s*\+?\s*AVAIL|OUT\s*OF\s*STOCK|SOLD\s*OUT))/gi;
+            let m;
+            while((m=regex.exec(raw))!==null){
+              const beforeNext=raw.indexOf('Quantity for ',regex.lastIndex);
+              const end=beforeNext<0?Math.min(raw.length,regex.lastIndex+105):Math.min(beforeNext,regex.lastIndex+105);
+              const part=raw.slice(regex.lastIndex,end);
+              put(m[2],m[1],parseStock(part,false),'text');
+            }
+            if(records.size)diagnostics.method.push('label/text');
+            const lines=(root.body?.innerText||root.body?.textContent||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+            let cols=null,splitter=null;
+            for(const line of lines){
+              const separator=line.includes('\t')?'\t':line.includes('|')?'\\|':null;
+              if(!separator)continue;
+              const rx=separator==='\t'?/\t/:/\|/;
+              const parts=line.split(rx).map(v=>v.trim());
+              if(parts.length<3)continue;
+              const normalized=parts.map(canon);
+              if(normalized.filter(x=>sizes.includes(x)).length>=2){cols=normalized;splitter=separator;continue}
+              if(!cols||separator!==splitter)continue;
+              const colour=cleanColor(parts[0]);
+              if(!colour)continue;
+              cols.forEach((size,i)=>{if(sizes.includes(size)&&parts[i])put(colour,size,parseStock(parts[i],true),'pasted-table')});
+            }
+            if(cols)diagnostics.method.push('pasted-table');
+            return {records:Array.from(records.values()),diagnostics};
+          };
+          ZONEFIT_DYNAMIC_EOF_1_4E6A
+          cat > scripts/worker-core.mjs <<'ZONEFIT_DYNAMIC_EOF_2_4E6A'
+          /*
+           * ZONEFIT AS Colour multi-product stock worker.
+           * Reads the supplier links from the existing protected Netlify worker-products API.
+           * Each request is a point-in-time observation. Never bypass access controls.
+           */
+          const AU_HOSTS = new Set(['ascolour.com.au', 'www.ascolour.com.au']);
+          const HALF_HOUR_MS = 30 * 60 * 1000;
+          const SUPPORTED_SIZES = new Set(['XSM','SML','MED','LRG','XLG','2XL','3XL','4XL','5XL']);
+          
+          export const normalCode = value => String(value ?? '').trim().toUpperCase().replace(/[^0-9A-Z]/g, '');
+          export function validAustralianProductURL(url, code) {
+            try {
+              const u = new URL(url);
+              if (u.protocol !== 'https:' || !AU_HOSTS.has(u.hostname.toLowerCase()) || u.username || u.password) return false;
+              const inPath = u.pathname.toUpperCase().match(/-(\d{3,5}[A-Z]?)\/?$/)?.[1];
+              return !!inPath && inPath === normalCode(code);
+            } catch { return false; }
+          }
+          const codeList = input => [...new Set(String(input ?? '').split(/[\s,;]+/).map(normalCode).filter(Boolean))];
+          
+          /**
+           * Always check priority linked products. Rotate other linked products across
+           * successive half-hour time slots, so later products cannot starve.
+           */
+          export function selectBatch(products, {
+            codes = 'ALL', priorityCodes = '5001,5026', maxStyles = 5,
+            now = new Date()
+          } = {}) {
+            const limit = Math.max(1, Math.min(8, Math.floor(Number(maxStyles)) || 5));
+            const eligible = (Array.isArray(products) ? products : [])
+              .filter(p => p && p.id && validAustralianProductURL(p.url, p.code))
+              .sort((a,b) => normalCode(a.code).localeCompare(normalCode(b.code)) || String(a.id).localeCompare(String(b.id)));
+            const unique = [], ids = new Set();
+            for (const p of eligible) { if (!ids.has(p.id)) { ids.add(p.id); unique.push(p); } }
+            const requested = String(codes ?? 'ALL').trim().toUpperCase();
+            if (requested !== 'ALL') {
+              const wanted = codeList(requested);
+              return wanted.flatMap(code => unique.filter(p => normalCode(p.code) === code)).slice(0,limit);
+            }
+            const priority = codeList(priorityCodes);
+            const selected = [];
+            for (const code of priority) {
+              for (const p of unique) if (normalCode(p.code)===code && !selected.includes(p) && selected.length<limit) selected.push(p);
+            }
+            const other = unique.filter(p => !selected.includes(p));
+            const slots = limit-selected.length;
+            if (slots<=0 || other.length===0) return selected;
+            if (other.length<=slots) return selected.concat(other);
+            const time = new Date(now).getTime();
+            if (!Number.isFinite(time)) throw new Error('Invalid scheduler time');
+            const index = (Math.floor(time/HALF_HOUR_MS) * slots) % other.length;
+            for (let j=0;j<slots;j++) selected.push(other[(index+j)%other.length]);
+            return selected;
+          }
+          
+          function stockReading(row) {
+            const raw = String(row?.quantity ?? '').replace(/,/g,'').trim();
+            if (!/^\d{1,8}\+?$/.test(raw) || raw === '0+') return null;
+            const n=Number(raw.replace('+',''));
+            if (!Number.isFinite(n) || n>10_000_000) return null;
+            const status=String(row.status ?? '').toLowerCase();
+            if ((n>0&&status==='out_of_stock')||(n===0&&status==='in_stock')) return null;
+            return {label:raw,number:n};
+          }
+          
+          export function validateCapture(capture, product, {min5001Rows=300,min5026Rows=100}={}) {
+            if (!capture || !Array.isArray(capture.records)) throw new Error('Supplier grid did not return stock records');
+            const byKey = new Map(), conflicted=new Set();
+            for (const item of capture.records) {
+              const colour=String(item?.colour ?? '').trim(),size=String(item?.size??'').toUpperCase().trim();
+              const stock=stockReading(item);
+              if (!colour||colour.length>55||!SUPPORTED_SIZES.has(size)||!stock) continue;
+              const key=colour.toLowerCase()+'|'+size;
+              if (conflicted.has(key)) continue;
+              const previous=byKey.get(key);
+              if (previous && previous.stock.label !== stock.label) { conflicted.add(key); byKey.delete(key); continue; }
+              byKey.set(key,{colour,size,stock});
+            }
+            // Do not count suspicious quantities repeated across five or more sizes of a
+            // single colour; such numbers often come from a shared page label, not stock.
+            const grouped = new Map();
+            for(const item of byKey.values()) {
+              const k=item.colour.toLowerCase(); if (!grouped.has(k)) grouped.set(k,[]); grouped.get(k).push(item);
+            }
+            for (const items of grouped.values()) {
+              const counts=new Map();
+              for(const item of items) counts.set(item.stock.label,(counts.get(item.stock.label)||0)+1);
+              for(const item of items) if ((counts.get(item.stock.label)||0)>=5) byKey.delete(item.colour.toLowerCase()+'|'+item.size);
+            }
+            const cells=byKey.size, colours=new Set([...byKey.values()].map(x=>x.colour.toLowerCase())).size;
+            const sizes=new Set([...byKey.values()].map(x=>x.size)).size;
+            const code=normalCode(product.code);
+            const minCells=code==='5001'?Math.max(100,Number(min5001Rows)||300):code==='5026'?Math.max(30,Number(min5026Rows)||100):6;
+            const minColours=code==='5001'?35:code==='5026'?10:1;
+            const minSizes=code==='5001'?5:code==='5026'?4:2;
+            if (cells<minCells||colours<minColours||sizes<minSizes) throw new Error(
+              `Incomplete supplier grid: ${cells} trustworthy cells, ${colours} colours, ${sizes} sizes. `+
+              `Required: ${minCells} cells, ${minColours} colours, ${minSizes} sizes. Nothing uploaded.`
+            );
+            return {cells,colours,sizes,rawRecords:capture.records.length};
+          }
+          
+          const safeMessage = err => String(err instanceof Error?err.message:err).slice(0,200);
+          
+          export async function runWorker({
+            site,token,collector,browserFactory,fetcher=fetch,log=console,
+            mode='preview',codes='ALL',priorityCodes='5001,5026',maxStyles=5,
+            now=new Date(),min5001Rows=300,min5026Rows=100,
+            waitBetween=async()=>{}
+          }={}) {
+            if (!site||!token) throw new Error('Missing GitHub secrets: ZONEFIT_SITE_URL or ZONEFIT_WORKER_TOKEN');
+            let origin;
+            try { const u=new URL(site);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error();origin=u.origin; }
+            catch {throw new Error('ZONEFIT_SITE_URL must be an HTTPS site origin without a path');}
+            if (!['sync','preview'].includes(mode))throw new Error('ZONEFIT_MODE must be preview or sync');
+            if(typeof browserFactory!=='function')throw new Error('Chromium runner missing');
+            const api=async(action,data)=>{
+              const response=await fetcher(`${origin}/.netlify/functions/api?action=${action}`,{
+                method:data?'POST':'GET',
+                headers:{Authorization:`Bearer ${token}`,...(data?{'Content-Type':'application/json'}:{})},
+                body:data?JSON.stringify(data):undefined,signal:AbortSignal.timeout(65_000)
+              });
+              const payload=await response.json().catch(()=>({}));
+              if(!response.ok) {
+                if(response.status===401)throw Error('Netlify rejected ZONEFIT_WORKER_TOKEN (401); check GitHub/Netlify worker secrets');
+                if(response.status===503)throw Error('Netlify worker token not configured (503); set ZONEFIT_WORKER_TOKEN in Netlify and redeploy');
+                if(response.status===404)throw Error('ZONEFIT API missing (404); full Netlify Functions project must be deployed');
+                throw Error(`ZONEFIT ${action} failed: ${String(payload.error||'HTTP '+response.status).slice(0,120)}`);
+              }
+              return payload;
+            };
+            const data=await api('worker-products');
+            const candidates=Array.isArray(data.products)?data.products:[];
+            const products=selectBatch(candidates,{codes,priorityCodes,maxStyles,now});
+            if(!products.length)throw Error('No matching linked AS Colour products. Save an Australian supplier URL in ZONEFIT > Supplier links.');
+            log.log(`ZONEFIT ${mode.toUpperCase()}: ${products.length} selected from ${candidates.length} linked Australian product(s). Styles: ${products.map(x=>x.code).join(', ')}.`);
+            const result={mode,linked:candidates.length,checked:0,saved:0,previewed:0,failed:0,products:[]};
+            const browser=await browserFactory();
+            try {
+              for(const product of products) {
+                result.checked++;
+                let context;
+                try {
+                  context=await browser.newContext({viewport:{width:1500,height:1000},locale:'en-AU',timezoneId:'Australia/Sydney'});
+                  const page=await context.newPage();
+                  const response=await page.goto(product.url,{waitUntil:'domcontentloaded',timeout:45_000});
+                  if(response && [401,403,429].includes(response.status()))throw Error(`Supplier returned HTTP ${response.status()} (access or rate limit)`);
+                  if(!validAustralianProductURL(page.url(),product.code))throw Error('Supplier redirected away from the matching Australian style page');
+                  await page.waitForTimeout(1800);
+                  const opener=page.getByText(/view bulk order grid/i);
+                  if(await opener.count()) {await opener.first().click({timeout:9000}).catch(()=>{});await page.waitForTimeout(1800);}
+                  await page.addScriptTag({content:collector});
+                  let captured,quality,lastError;
+                  for(let retry=0;retry<4;retry++){
+                    captured=await page.evaluate(()=>window.zonefitCollectVariants(document));
+                    try {quality=validateCapture(captured,product,{min5001Rows,min5026Rows});break;}
+                    catch(err){lastError=err;if(retry<3)await page.waitForTimeout(2500);}
+                  }
+                  if(!quality)throw(lastError||new Error('No verified stock quantities'));
+                  if(mode==='preview') {
+                    result.previewed++;
+                    result.products.push({code:product.code,status:'preview',...quality});
+                    log.log(`[PREVIEW] ${product.code}: ${quality.cells} trusted cells, ${quality.colours} colours, ${quality.sizes} sizes. No cloud update.`);
+                  } else {
+                    const payload={source:page.url(),capturedAt:new Date().toISOString(),records:captured.records,diagnostics:captured.diagnostics};
+                    const update=await api('worker-capture',{productId:product.id,payload});
+                    result.saved++;
+                    result.products.push({code:product.code,status:'saved',...quality,observed:update.observed,changes:update.changes});
+                    log.log(`[SAVED] ${product.code}: ${update.observed} accepted stock cells, ${update.changes} changes. Cloud updated.`);
+                  }
+                }catch(error){
+                  const message=safeMessage(error);result.failed++;
+                  result.products.push({code:product.code,status:'failed',message});
+                  log.error(`[FAILED] ${product.code}: ${message}. Previous inventory preserved.`);
+                  if(mode==='sync') await api('worker-report',{productId:product.id,message}).catch(()=>{});
+                }finally{if(context)await context.close().catch(()=>{});await waitBetween();}
+              }
+            }finally{await browser.close();}
+            return result;
+          }
+          ZONEFIT_DYNAMIC_EOF_2_4E6A
+          cat > scripts/browser-worker.mjs <<'ZONEFIT_DYNAMIC_EOF_3_4E6A'
+          import {readFile,appendFile} from 'node:fs/promises';
+          import {runWorker} from './worker-core.mjs';
+          
+          async function main(){
+            const {chromium}=await import('playwright');
+            const mode=String(process.env.ZONEFIT_MODE||'preview').toLowerCase();
+            const collector=await readFile(new URL('../public/capture_collector.js',import.meta.url),'utf8');
+            const result=await runWorker({
+              site:process.env.ZONEFIT_SITE_URL||'',token:process.env.ZONEFIT_WORKER_TOKEN||'',collector,
+              mode,codes:process.env.ZONEFIT_STYLE_CODES||'ALL',
+              priorityCodes:process.env.ZONEFIT_PRIORITY_CODES||'5001,5026',
+              maxStyles:Number(process.env.ZONEFIT_MAX_STYLES||5),
+              min5001Rows:Number(process.env.ZONEFIT_MIN_5001_ROWS||300),
+              min5026Rows:Number(process.env.ZONEFIT_MIN_5026_ROWS||100),
+              browserFactory:()=>chromium.launch({headless:true}),
+              waitBetween:()=>new Promise(resolve=>setTimeout(resolve,2800))
+            });
+            console.log(`Finished: ${result.checked} checked, ${result.saved} saved, ${result.previewed} previewed, ${result.failed} failed.`);
+            if(process.env.GITHUB_STEP_SUMMARY){
+              const lines=[
+                '# ZONEFIT multi-product AS Colour monitor',
+                `**Mode:** ${mode}  `,`**Checked:** ${result.checked} of ${result.linked} linked styles  `,
+                '| Style | Result | Verified cells | Changes | Notes |', '|:---|:---|---:|---:|:---|',
+                ...result.products.map(p=>`| ${p.code} | ${p.status} | ${p.cells??'-'} | ${p.changes??'-'} | ${String(p.message||'').replace(/\|/g,'/')} |`),
+                '',mode==='preview'?'Preview did not change cloud stock. Run **sync** to save successful captures.':'Only successfully validated product captures were sent to the existing Netlify inventory.',
+                result.failed?'One or more products failed. Existing inventory was preserved for those products.':'No product errors in this run.',''
+              ];
+              await appendFile(process.env.GITHUB_STEP_SUMMARY,lines.join('\n')).catch(()=>{});
+            }
+            if(result.failed)process.exitCode=1;
+          }
+          main().catch(async error=>{
+            console.error('[SETUP ERROR]',error.message);
+            if(process.env.GITHUB_STEP_SUMMARY)await appendFile(process.env.GITHUB_STEP_SUMMARY,'\n### ZONEFIT setup error\n'+String(error.message).slice(0,220)+'\n').catch(()=>{});
+            process.exitCode=1;
+          });
+          ZONEFIT_DYNAMIC_EOF_3_4E6A
+          cat > tests/worker.test.mjs <<'ZONEFIT_DYNAMIC_EOF_4_4E6A'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import {readFile} from 'node:fs/promises';
+          import {selectBatch,validAustralianProductURL,validateCapture,runWorker} from '../scripts/worker-core.mjs';
+          
+          const products=[
+           {id:'ascolour-p02-5001',code:'5001',name:'Staple Tee',url:'https://www.ascolour.com.au/staple-tee-5001/'},
+           {id:'ascolour-p02-5026',code:'5026',name:'Classic Tee',url:'https://www.ascolour.com.au/classic-tee-5026/'},
+           {id:'ascolour-p04-5080',code:'5080',name:'Heavy Tee',url:'https://www.ascolour.com.au/heavy-tee-5080/'},
+          ];
+          const makeCapture=(colours,sizes)=>({records:Array.from({length:colours},(_,ci)=>
+           Array.from({length:sizes},(_,si)=>({colour:`Colour ${ci+1}`,size:['XSM','SML','MED','LRG','XLG','2XL','3XL','4XL','5XL'][si],quantity:String(ci*10+si+1)}))
+          ).flat(),diagnostics:{matchedCells:colours*sizes}});
+          const capt={5001:makeCapture(65,8),5026:makeCapture(38,7),5080:makeCapture(4,5)};
+          const silent={log:()=>{},error:()=>{}};
+          const common={site:'https://zonefit.example',token:'worker-secret',collector:'window.zonefitCollectVariants = function(){}',priorityCodes:'5001,5026',maxStyles:5,log:silent,waitBetween:async()=>{},now:new Date('2026-11-01T00:00:00Z')};
+          function harness({linked=products,captures=capt,redirect=null,failCode=null,authResponse=200}={}){
+           const calls=[],opened=[],closed=[];
+           const fetcher=async(url,opt)=>{
+            const action=new URL(url).searchParams.get('action');
+            calls.push({action,method:opt.method,body:opt.body?JSON.parse(opt.body):null});
+            if(authResponse!==200)return Response.json({error:'unauthorised'},{status:authResponse});
+            if(action==='worker-products')return Response.json({products:linked});
+            if(action==='worker-capture')return Response.json({observed:opt.body?JSON.parse(opt.body).payload.records.length:0,changes:2});
+            if(action==='worker-report')return Response.json({recorded:true});
+            throw new Error('Bad API action '+action);
+           };
+           const browser={
+            newContext:async()=>{
+             let current='';
+             const page={
+              goto:async url=>{current=url;opened.push(url);return {status:()=>200}},
+              url:()=>redirect??current,
+              waitForTimeout:async()=>{},
+              getByText:()=>({count:async()=>1,first:()=>({click:async()=>{}})}),
+              addScriptTag:async ({content})=>assert.match(content,/zonefitCollectVariants/),
+              evaluate:async()=>failCode&&current.includes('-'+failCode+'/')?{records:[]}:
+                captures[current.match(/-(\d{3,5}[A-Z]?)\/$/)[1]]
+             };
+             return {newPage:async()=>page,close:async()=>closed.push('context')};
+            },
+            close:async()=>closed.push('browser')
+           };
+           return {fetcher,browserFactory:async()=>browser,calls,opened,closed};
+          }
+          
+          test('accepts Australian exact product URLs only',()=>{
+           assert.ok(validAustralianProductURL(products[0].url,'5001'));
+           for(const bad of ['https://ascolour.com/staple-tee-5001/','https://www.ascolour.com.au.evil.com/staple-tee-5001/','http://www.ascolour.com.au/staple-tee-5001/','https://www.ascolour.com.au/classic-tee-5026/'])
+            assert.ok(!validAustralianProductURL(bad,'5001'),bad);
+          });
+          test('linked AS Colour products are discovered automatically, no hardcoded 5001 filter',()=>{
+           assert.deepEqual(selectBatch(products,{now:common.now}).map(p=>p.code),['5001','5026','5080']);
+           assert.deepEqual(selectBatch(products.filter(p=>p.code!=='5026'),{now:common.now}).map(p=>p.code),['5001','5080']);
+           assert.deepEqual(selectBatch(products,{codes:'5080',now:common.now}).map(p=>p.code),['5080']);
+          });
+          test('priorities always selected while non-priority batches rotate fairly',()=>{
+           const others=Array.from({length:103},(_,i)=>({id:'p'+i,code:String(6000+i),url:`https://www.ascolour.com.au/test-${6000+i}/`}));
+           const all=[...products.slice(0,2),...others];
+           const seen=new Set();
+           for(let slot=0;slot<36;slot++){
+             const at=new Date(common.now.getTime()+slot*30*60*1000);
+             const current=selectBatch(all,{now:at,maxStyles:5});
+             assert.deepEqual(current.slice(0,2).map(x=>x.code),['5001','5026']);
+             current.slice(2).forEach(p=>seen.add(p.code));
+           }
+           assert.equal(seen.size,103);
+          });
+          test('incomplete 5001 and 5026 captures are blocked before upload',()=>{
+           assert.equal(validateCapture(capt[5001],products[0]).cells,520);
+           assert.equal(validateCapture(capt[5026],products[1]).cells,266);
+           assert.throws(()=>validateCapture({records:capt[5026].records.slice(0,25)},products[1]),/Incomplete supplier grid/);
+           assert.throws(()=>validateCapture({records:capt[5001].records.map(x=>({...x,quantity:'0+'}))},products[0]),/Incomplete supplier grid/);
+          });
+          test('suspicious duplicated size quantities and contradictory stock are not accepted',()=>{
+           const repeated=Array.from({length:7},(_,i)=>({colour:'Black',size:['XSM','SML','MED','LRG','XLG','2XL','3XL'][i],quantity:'123'}));
+           assert.throws(()=>validateCapture({records:repeated},products[2]),/Incomplete supplier grid/);
+           const bad=Array.from({length:7},(_,i)=>({colour:'Green',size:['XSM','SML','MED','LRG','XLG','2XL','3XL'][i],quantity:'10',status:'out_of_stock'}));
+           assert.throws(()=>validateCapture({records:bad},products[2]),/Incomplete supplier grid/);
+          });
+          test('preview visits two linked products without writing stock',async()=>{
+           const h=harness();const r=await runWorker({...common,...h,mode:'preview',codes:'5001,5026'});
+           assert.equal(r.previewed,2);assert.equal(r.saved,0);assert.equal(r.failed,0);
+           assert.equal(h.calls.filter(x=>x.action==='worker-capture').length,0);
+           assert.equal(h.opened.length,2);
+          });
+          test('sync uploads both linked products using existing Netlify worker-capture endpoint',async()=>{
+           const h=harness();const r=await runWorker({...common,...h,mode:'sync'});
+           assert.equal(r.saved,3);assert.equal(r.failed,0);
+           const posts=h.calls.filter(x=>x.action==='worker-capture');
+           assert.equal(posts.length,3);
+           assert.deepEqual(posts.map(p=>p.body.productId),products.map(p=>p.id));
+           for(const p of posts){assert.ok(p.body.payload.records.length>3);assert.ok(p.body.payload.source.startsWith('https://www.ascolour.com.au/'));}
+          });
+          test('one product failure never erases inventory or prevents other product updates',async()=>{
+           const h=harness({failCode:'5026'});const r=await runWorker({...common,...h,mode:'sync'});
+           assert.equal(r.saved,2);assert.equal(r.failed,1);
+           assert.equal(h.calls.filter(x=>x.action==='worker-capture').length,2);
+           assert.equal(h.calls.filter(x=>x.action==='worker-report').length,1);
+           assert.ok(r.products.find(x=>x.code==='5026'&&x.status==='failed'));
+          });
+          test('supplier redirect blocks a bad capture and logs failure',async()=>{
+           const h=harness({redirect:'https://www.ascolour.com.au/login/'});
+           const r=await runWorker({...common,...h,mode:'sync',codes:'5001'});
+           assert.equal(r.failed,1);assert.equal(r.saved,0);
+           assert.equal(h.calls.filter(x=>x.action==='worker-capture').length,0);
+          });
+          test('missing Netlify worker credentials stop before opening the supplier site',async()=>{
+           const h=harness({authResponse:401});
+           await assert.rejects(runWorker({...common,...h}),/rejected ZONEFIT_WORKER_TOKEN/);
+           assert.equal(h.opened.length,0);
+          });
+          test('30-minute scheduled workflow selects ALL mapped styles, manual mode defaults to preview',async()=>{
+           const yml=await readFile(new URL('../.github/workflows/zonefit-daily-stock.yml',import.meta.url),'utf8');
+           assert.match(yml,/cron: '7,37 \* \* \* \*'/);
+           assert.match(yml,/timezone: 'Australia\/Sydney'/);
+           assert.match(yml,/default: preview/);
+           assert.match(yml,/ZONEFIT_PRIORITY_CODES: '5001,5026'/);
+           assert.match(yml,/ZONEFIT_STYLE_CODES: \$\{\{ inputs\.styles \|\| 'ALL' \}\}/);
+           assert.match(yml,/github\.event_name == 'schedule' && 'sync'/);
+          });
+          ZONEFIT_DYNAMIC_EOF_4_4E6A
+          test -s package.json && test -s scripts/browser-worker.mjs
+          echo "ZONEFIT dynamic checker: bundled files prepared successfully."
+      - name: Install checker dependencies
+        run: npm install --no-audit --no-fund
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Test multi-product selection and stock protection
+        run: npm test
+      - name: Check linked suppliers and report to existing ZONEFIT
+        env:
+          ZONEFIT_SITE_URL: ${{ secrets.ZONEFIT_SITE_URL }}
+          ZONEFIT_WORKER_TOKEN: ${{ secrets.ZONEFIT_WORKER_TOKEN }}
+          ZONEFIT_MODE: ${{ github.event_name == 'schedule' && 'sync' || inputs.mode || 'preview' }}
+          ZONEFIT_STYLE_CODES: ${{ inputs.styles || 'ALL' }}
+          ZONEFIT_PRIORITY_CODES: '5001,5026'
+          ZONEFIT_MAX_STYLES: '5'
+          ZONEFIT_MIN_5001_ROWS: '300'
+          ZONEFIT_MIN_5026_ROWS: '100'
+        run: npm run worker
