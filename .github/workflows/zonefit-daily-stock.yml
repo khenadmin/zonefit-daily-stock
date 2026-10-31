@@ -1,22 +1,27 @@
-# ZONEFIT self-contained GitHub workflow, created to avoid missing package.json
-# No extra source-file uploads required: this YAML creates its checker sources at runtime.
-# Keep GitHub secrets ZONEFIT_SITE_URL and ZONEFIT_WORKER_TOKEN configured.
-name: ZONEFIT - Daily AS Colour stock sync
+# ZONEFIT 4.1 -- dynamic AS Colour product links
+# One-file workflow: recreates its own dependencies and checker on each run.
+# Uses the existing Netlify worker-products API: no Netlify redeployment required.
+# Priority: 5001 and 5026 on each run when linked; other linked styles rotate.
+name: ZONEFIT - Universal AS Colour stock sync (30 min)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Preview checks first; Sync saves verified stock to ZONEFIT"
+        description: "Preview reads stock; Sync saves validated readings to ZONEFIT"
         type: choice
         options:
           - preview
           - sync
         default: preview
         required: true
+      styles:
+        description: "ALL linked AS Colour styles (or e.g. 5001,5026)"
+        type: string
+        default: ALL
+        required: true
   schedule:
-    # 6:17 am Sydney local time (GitHub schedule may start late)
-    - cron: '17 6 * * *'
+    - cron: '7,37 * * * *'
       timezone: 'Australia/Sydney'
 
 permissions:
@@ -28,9 +33,9 @@ concurrency:
 
 jobs:
   stock-check:
-    name: Check Staple Tee 5001
+    name: Check linked AS Colour styles
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Get workflow
         uses: actions/checkout@v4
@@ -38,15 +43,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Prepare bundled checker (fix missing package.json)
+      - name: Prepare bundled multi-product checker
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p scripts public tests
-          cat > package.json <<'ZONEFIT_INLINE_EOF_0_A8DC'
+          cat > package.json <<'ZONEFIT_DYNAMIC_EOF_0_4E6A'
           {
-            "name": "zonefit-daily-ascolour-worker",
-            "version": "1.0.0",
+            "name": "zonefit-universal-ascolour-sync",
+            "version": "4.1.0",
             "private": true,
             "type": "module",
             "engines": {"node": ">=22"},
@@ -54,12 +59,10 @@ jobs:
               "worker": "node scripts/browser-worker.mjs",
               "test": "node --test tests/*.test.mjs"
             },
-            "dependencies": {
-              "playwright": "1.55.0"
-            }
+            "dependencies": {"playwright": "1.55.0"}
           }
-          ZONEFIT_INLINE_EOF_0_A8DC
-          cat > public/capture_collector.js <<'ZONEFIT_INLINE_EOF_1_A8DC'
+          ZONEFIT_DYNAMIC_EOF_0_4E6A
+          cat > public/capture_collector.js <<'ZONEFIT_DYNAMIC_EOF_1_4E6A'
           // Collected from user-tested ZONEFIT Staple Tee capture bookmarklet.
           // Supplier quantities may still need verification.
           window.zonefitCollectVariants = function(root){
@@ -91,6 +94,3 @@ jobs:
               const key=c.toLowerCase()+'|'+s,old=records.get(key);
               if(!old || ((old.minQty===null && parsed.minQty!==null) || (old.method!=='table' && method==='table'))){
                 records.set(key,{colour:c,size:s,quantity:parsed.label,minQty:parsed.minQty,status:parsed.status,isMinimum:parsed.isMinimum,method:method});
-              }
-              diagnostics.matchedCells++;
-            }
