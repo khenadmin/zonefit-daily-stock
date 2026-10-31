@@ -1,3 +1,6 @@
+# ZONEFIT self-contained GitHub workflow, created to avoid missing package.json
+# No extra source-file uploads required: this YAML creates its checker sources at runtime.
+# Keep GitHub secrets ZONEFIT_SITE_URL and ZONEFIT_WORKER_TOKEN configured.
 name: ZONEFIT - Daily AS Colour stock sync
 
 on:
@@ -12,8 +15,7 @@ on:
         default: preview
         required: true
   schedule:
-    # 06:17 every morning in Sydney, including daylight-saving changes.
-    # 17 minutes past the hour avoids GitHub's common top-of-hour delays.
+    # 6:17 am Sydney local time (GitHub schedule may start late)
     - cron: '17 6 * * *'
       timezone: 'Australia/Sydney'
 
@@ -30,24 +32,65 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Get checker code
+      - name: Get workflow
         uses: actions/checkout@v4
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install checker dependencies
-        run: npm install --no-audit --no-fund
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
-      - name: Check source code
-        run: npm test
-      - name: Check supplier stock and report to ZONEFIT
-        env:
-          ZONEFIT_SITE_URL: ${{ secrets.ZONEFIT_SITE_URL }}
-          ZONEFIT_WORKER_TOKEN: ${{ secrets.ZONEFIT_WORKER_TOKEN }}
-          ZONEFIT_MODE: ${{ inputs.mode || 'sync' }}
-          ZONEFIT_STYLE_CODES: '5001'
-          ZONEFIT_MAX_STYLES: '1'
-          ZONEFIT_MIN_5001_ROWS: '300'
-        run: npm run worker
+      - name: Prepare bundled checker (fix missing package.json)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p scripts public tests
+          cat > package.json <<'ZONEFIT_INLINE_EOF_0_A8DC'
+          {
+            "name": "zonefit-daily-ascolour-worker",
+            "version": "1.0.0",
+            "private": true,
+            "type": "module",
+            "engines": {"node": ">=22"},
+            "scripts": {
+              "worker": "node scripts/browser-worker.mjs",
+              "test": "node --test tests/*.test.mjs"
+            },
+            "dependencies": {
+              "playwright": "1.55.0"
+            }
+          }
+          ZONEFIT_INLINE_EOF_0_A8DC
+          cat > public/capture_collector.js <<'ZONEFIT_INLINE_EOF_1_A8DC'
+          // Collected from user-tested ZONEFIT Staple Tee capture bookmarklet.
+          // Supplier quantities may still need verification.
+          window.zonefitCollectVariants = function(root){
+            const sizes=['XSM','SML','MED','LRG','XLG','2XL','3XL','4XL','5XL'];
+            const aliases={'XS':'XSM','S':'SML','M':'MED','L':'LRG','XL':'XLG','XXL':'2XL'};
+            const records=new Map(), diagnostics={tables:0,tableRows:0,quantityLabels:0,matchedCells:0,method:[]};
+            function canon(s){const t=String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');return aliases[t]||t}
+            function cleanColor(v){
+              let t=String(v||'').replace(/\s+/g,' ').trim().replace(/\b(?:NEW COLOURS?|COMING SOON|OUTLET)\b/gi,'').trim();
+              t=t.replace(/^[^A-Za-z]+/,'').replace(/\s*(?:\d+\s*AVAIL\.?|No restock planned).*$/i,'').trim();
+              if(!t||t.length>55||/^(COLOU?R|TOTALS|SIZE|ENTER QUANTITY|QUANTITY)$/i.test(t))return '';
+              return t.split(' ').map(w=>w.length===1?w.toUpperCase():w[0].toUpperCase()+w.slice(1).toLowerCase()).join(' ');
+            }
+            function parseStock(input,allowBare){
+              const text=String(input||'').replace(/\s+/g,' ').trim();
+              if(!text)return null;
+              let m=text.match(/(?:^|\b)([\d,]+)\s*(\+?)\s*(?:AVAIL(?:ABLE)?\.?|IN\s*STOCK\b|(?:UNITS?|PIECES?)\s*(?:LEFT|AVAILABLE)|LEFT\s+IN\s+STOCK)/i);
+              if(!m)m=text.match(/(?:stock\s*level|stock\s*qty|stock\s*quantity|available\s*qty|available\s*stock)\s*[:=]\s*([\d,]+)\s*(\+?)/i);
+              if(!m&&allowBare)m=text.match(/^\s*([\d,]+)\s*(\+?)\s*$/);
+              if(m){const n=Number(m[1].replace(/,/g,''));if(!Number.isFinite(n))return null;return {label:n.toLocaleString('en-AU')+(m[2]||''),minQty:n,status:n>0?'in_stock':'out_of_stock',isMinimum:!!m[2]}}
+              if(/\b(?:OUT\s*OF\s*STOCK|SOLD\s*OUT|UNAVAILABLE|NO\s*STOCK|NOT\s*AVAILABLE)\b/i.test(text))return {label:'0',minQty:0,status:'out_of_stock',isMinimum:false};
+              if(/\b(?:COMING\s*SOON|BACK\s*ORDER|PRE\s*ORDER)\b/i.test(text))return {label:'Soon',minQty:null,status:'coming_soon',isMinimum:false};
+              if(/\b(?:IN\s*STOCK|AVAILABLE)\b/i.test(text))return {label:'Available',minQty:null,status:'in_stock',isMinimum:false};
+              return null;
+            }
+            function put(color,size,parsed,method){
+              const c=cleanColor(color),s=canon(size);
+              if(!c||!sizes.includes(s)||!parsed)return;
+              const key=c.toLowerCase()+'|'+s,old=records.get(key);
+              if(!old || ((old.minQty===null && parsed.minQty!==null) || (old.method!=='table' && method==='table'))){
+                records.set(key,{colour:c,size:s,quantity:parsed.label,minQty:parsed.minQty,status:parsed.status,isMinimum:parsed.isMinimum,method:method});
+              }
+              diagnostics.matchedCells++;
+            }
