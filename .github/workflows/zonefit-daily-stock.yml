@@ -1,0 +1,53 @@
+name: ZONEFIT - Daily AS Colour stock sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Preview checks first; Sync saves verified stock to ZONEFIT"
+        type: choice
+        options:
+          - preview
+          - sync
+        default: preview
+        required: true
+  schedule:
+    # 06:17 every morning in Sydney, including daylight-saving changes.
+    # 17 minutes past the hour avoids GitHub's common top-of-hour delays.
+    - cron: '17 6 * * *'
+      timezone: 'Australia/Sydney'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zonefit-ascolour-daily
+  cancel-in-progress: false
+
+jobs:
+  stock-check:
+    name: Check Staple Tee 5001
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Get checker code
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install checker dependencies
+        run: npm install --no-audit --no-fund
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Check source code
+        run: npm test
+      - name: Check supplier stock and report to ZONEFIT
+        env:
+          ZONEFIT_SITE_URL: ${{ secrets.ZONEFIT_SITE_URL }}
+          ZONEFIT_WORKER_TOKEN: ${{ secrets.ZONEFIT_WORKER_TOKEN }}
+          ZONEFIT_MODE: ${{ inputs.mode || 'sync' }}
+          ZONEFIT_STYLE_CODES: '5001'
+          ZONEFIT_MAX_STYLES: '1'
+          ZONEFIT_MIN_5001_ROWS: '300'
+        run: npm run worker
